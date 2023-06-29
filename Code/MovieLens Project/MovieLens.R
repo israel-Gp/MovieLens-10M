@@ -80,6 +80,7 @@ rm(dl, ratings, movies, test_index, temp, movielens, removed)
 
 # Save Dataset as R file --------------------------------------------------
 
+dir.create(file.path(getwd(),'Data'),showWarnings = FALSE)
 saveRDS(edx, file = file.path('Data', 'edx.rds'))
 saveRDS(final_holdout_test, file = file.path('Data', 'final_holdout_test.rds'))
 
