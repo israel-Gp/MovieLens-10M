@@ -64,8 +64,8 @@ test_index <-
     p = 0.1,
     list = FALSE
   )
-edx <- movielens[-test_index,]
-temp <- movielens[test_index,]
+edx <- movielens[-test_index, ]
+temp <- movielens[test_index, ]
 
 # Make sure userId and movieId in final hold-out test set are also in edx set
 final_holdout_test <- temp %>%
@@ -90,6 +90,7 @@ saveRDS(final_holdout_test, file = file.path('Data', 'final_holdout_test.rds'))
 
 # Set Custom Project Themes and Functions ---------------------------------
 
+library(scales)
 theme_set(theme_bw())
 
 ## Define color palette for expected factors ------------------------------
@@ -208,7 +209,7 @@ clear_memory(keep = 'edx_train')
 # Model Considerations ----------------------------------------------------
 
 # Recommendation systems are a type of information filtering system,
-# a system that remopves redundant iformatio, in this case recommendations
+# a system that removes redundant information, in this case recommendations
 # are performed by predictive film rating
 # Recommendation systems come in three basic filtering categories
 # Content
@@ -218,9 +219,298 @@ clear_memory(keep = 'edx_train')
 
 # Content utilizes item (in this case film) attributes to recommend similar items
 # Collaborative utilizes user (film reviewers) similarity for recommendations
-# Contextual filtering utilizes user-item-enviorment context for recommendations
+# Contextual filtering utilizes user-item-environment context for recommendations
 
 # Content based filtering can utilize film features for prediction
 # Collaborative filtering can utilize a matrix factorization for predictions
-# Contextual based filtering can utilize review enviorment data 
+# Contextual based filtering can utilize review environment data
 
+# These models lack independent film input, films of similar context or environment
+# will differ in popularity (eg The Dark Knight vs Batman & Robin)
+# A film based model is required to account for this missing input
+
+# A ensemble model can be utilized to merge the different model
+# for simplicity a linear regression stacked model will be used
+
+glimpse(edx_train)
+
+# this requires removal of film ID and title
+# year of release to be separated from title
+# title words may be used to cluster films using K-Modes utilizing title words
+# as categories
+# genres are to be separated and used as individual contexts
+# as with film words these can be clustered using K-Modes
+# Users can develop a pallet as time progresses, therefore timestamps in
+# their raw form may be required if user reviews by time are a relevant feature
+# this will require sorting by timestamp
+
+# Data Cleaning -----------------------------------------------------------
+
+# This data cleaning should be performed for all model features
+
+# Determine empty data
+edx_train %>%
+  summarise(across(everything(), \(x) sum(is.na(x))))
+
+# No data imputation or removal required
+
+glimpse(edx_train)
+
+# Date-time data to be prepared and previously mentioned contexts to be extracted
+# and individual features engineered
+
+edx_train <- edx_train %>%
+  # Clean timestamp
+  # Relocate response variable as preferred
+  relocate(rating) %>%
+  # Clean timestamp
+  mutate(across(timestamp, as_datetime)) %>%
+  # sort by time
+  arrange(timestamp) %>%
+  # Separate Title Features
+  separate_wider_regex(
+    title,
+    patterns = c(
+      title = '[:print:]+(?=(?:[:space:]\\([:digit:]{4}\\)))',
+      ' \\(',
+      film_year_of_release = '.*',
+      '\\)'
+    )
+  ) %>%
+  # Separate genres
+  separate_wider_delim(genres,
+                       delim = '|',
+                       names_sep = '_',
+                       too_few = 'align_start') %>%
+  # Rename genres to singular
+  rename_with(~ str_replace(.x, '^genres', 'genre')) %>%
+  # Replace NA genres with None
+  mutate(across(starts_with('genre'), \(x) replace_na(x, 'None'))) %>%
+  # Engineer date-time features
+  mutate(
+    film_year_of_release = as.numeric(str_extract(film_year_of_release, '[:digit:]{4}')),
+    # Convert timestamp to date-time
+    timestamp = as_datetime(timestamp),
+    # Extract date features
+    year = year(timestamp),
+    month = month(timestamp, label = TRUE, abbr = FALSE),
+    day = day(timestamp),
+    day_of_the_year = yday(timestamp),
+    day_of_the_quarter = qday(timestamp),
+    # Day of the Week, weeks starts on Monday
+    weekday = wday(
+      timestamp,
+      label = TRUE,
+      abbr = FALSE,
+      week_start = 1
+    ),
+    # Extract Time Features
+    hour = hour(timestamp),
+    minute = minute(timestamp),
+    second = second(timestamp),
+    # Calculate Film Age
+    film_age = year - film_year_of_release,
+  ) %>%
+  # Relocate features as preffered
+  relocate(film_year_of_release, .before = timestamp) %>%
+  relocate(film_age, .after = film_year_of_release) %>%
+  # Genres as Factors
+  mutate(across(starts_with('genre'), as.factor))
+
+# Save Train and Test Set to File for storage
+saveRDS(edx_train, file = file.path('Data', 'edx_train.rds'))
+
+# Clear Memory
+# Keep Training Set
+clear_memory(keep = 'edx_train')
+
+# Feature Extraction ------------------------------------------------------
+
+### Title Clusters --------------------------------------------------------
+
+library(tidytext)
+
+# Individual Films and title words in tidy format
+# Keep cases
+title_words <- edx_train %>%
+  distinct(movie_id, .keep_all = TRUE) %>%
+  ungroup() %>%
+  unnest_tokens('title_words', 'title',
+                token = 'words',
+                to_lower = FALSE) %>%
+  group_by(movie_id) %>%
+  mutate(word_n = paste('word', row_number(), sep = '_')) %>%
+  ungroup() %>%
+  select(all_of(c('movie_id', 'title_words', 'word_n')))
+
+title_words_wide <- title_words %>%
+  pivot_wider(names_from = word_n,
+              values_from = title_words,
+              values_fill = 'None') %>%
+  mutate(across(starts_with('word_'), as.factor))
+
+title_words_selections <- title_words_wide %>%
+  pivot_longer(
+    cols = starts_with('word_'),
+    names_to = 'word',
+    names_transform = list(word = as_factor)
+  ) %>%
+  mutate(is_na = str_detect(value, 'None')) %>%
+  group_by(word) %>%
+  summarise(na_prop = mean(is_na == TRUE)) %>%
+  filter(na_prop <= 0.5) %>%
+  pull(word) %>%
+  as.character()
+
+# Custom K-Modes Function for nested tibbles
+kmodes_fn <-
+  function(data,
+           modes,
+           seed,
+           iter.max = 10,
+           weighted = FALSE,
+           fast = TRUE) {
+    set.seed(seed, sample.kind = 'Rounding')
+    model <-
+      klaR::kmodes(
+        data = data,
+        modes = modes,
+        iter.max = iter.max,
+        weighted = weighted,
+        fast = fast
+      )
+    return(sum(model[4]$withindiff))
+  }
+
+title_words_counts <- title_words %>%
+  filter(word_n %in% title_words_selections) %>%
+  count(title_words, sort = TRUE)
+
+mode_stat <- function(x) {
+  uniqv <- unique(x)
+  uniqv[which.max(tabulate(match(x, uniqv)))]
+}
+
+title_words_counts_stats <- title_words_counts %>%
+  filter(n > 1) %>%
+  summarise(
+    count = length(unique(title_words)),
+    mean = mean(n),
+    sd = sd(n),
+    max_limit = ceiling(max(n) * 0.8)
+  )
+
+title_words_counts_stats
+
+# The amount of clusters would be too large to compute in an efficient manner
+# within the limitations of this project
+
+# Clear Memory
+# Keep Training Set
+clear_memory(keep = 'edx_train')
+
+## Genre Clusters ---------------------------------------------------------
+
+edx_genre_wide <- edx_train %>%
+  distinct(movie_id, .keep_all = TRUE) %>%
+  select(c(movie_id, starts_with('genre')))
+
+edx_genre_selections <- edx_genre_wide %>%
+  pivot_longer(
+    cols = starts_with('genre_'),
+    names_to = 'genre',
+    names_transform = list(word = as_factor)
+  ) %>%
+  mutate(is_na = str_detect(value, 'None')) %>%
+  group_by(genre) %>%
+  summarise(na_prop = mean(is_na == TRUE)) %>%
+  filter(na_prop <= 0.5) %>%
+  pull(genre) %>%
+  as.character()
+
+edx_genre_removal <- edx_genre_wide %>%
+  pivot_longer(
+    cols = starts_with('genre_'),
+    names_to = 'genre',
+    names_transform = list(word = as_factor)
+  ) %>%
+  mutate(is_na = str_detect(value, 'None')) %>%
+  group_by(genre) %>%
+  summarise(na_prop = mean(is_na == TRUE)) %>%
+  filter(na_prop > 0.5) %>%
+  pull(genre) %>%
+  as.character()
+
+edx_genre_wide_num <- edx_genre_wide %>%
+  select(all_of(edx_genre_selections)) %>%
+  mutate(across(everything(), as.numeric))
+
+genre_clusters_min <- edx_genre_wide %>%
+  pivot_longer(
+    cols = starts_with('genre_'),
+    names_to = 'genre',
+    names_transform = list(word = as_factor)
+  ) %>%
+  distinct(value) %>%
+  nrow()
+
+genre_clusters_max <- edx_genre_wide_num %>%
+  distinct() %>%
+  nrow()
+
+genre_clusters_max
+# 144 Maximum clusters, while complex it is a manageable analysis
+
+kmodes_data <-
+  tibble(clusters = genre_clusters_min:genre_clusters_max,
+         data = list(edx_genre_wide_num)) %>%
+  mutate(k_modes = map2(
+    data,
+    clusters,
+    seed = 2131,
+    weighted = TRUE,
+    # Using Weighted distances to account for differences in genre frequencies
+    kmodes_fn,
+    .progress = 'K-Modes'
+  ))
+
+
+kmodes_data %>%
+  select(-all_of('data')) %>%
+  unnest(cols = 'k_modes') %>%
+  ggplot(aes(x = clusters, y = k_modes, label = clusters)) +
+  geom_point() +
+  geom_line() +
+  geom_text_repel() +
+  xlab('Clusters') +
+  ylab('Within-Cluster Simple-Matching Distance') +
+  ggtitle('MovieLens Genre Optimal Clusters',
+          subtitle = 'Genre Level Clustering based on the K-Modes Algorithm')
+
+
+# The optimal amount of clusters is 36
+
+genre_clusters <-
+  klaR::kmodes(
+    edx_genre_wide_num,
+    modes = 36,
+    weighted = TRUE,
+    fast = TRUE
+  )
+
+edx_genre_clusters <- edx_genre_wide %>% 
+  mutate(genre_cluster = as_factor(genre_clusters$cluster)) %>% 
+  select(all_of(c('movie_id','genre_cluster')))
+
+edx_train <- edx_train %>% 
+  left_join(edx_genre_clusters) %>% 
+  relocate(genre_cluster, .before = 'genre_1') %>% 
+  select(-all_of(edx_genre_removal))
+
+# Save Train and Genre Clusters
+saveRDS(edx_train, file = file.path('Data', 'edx_train.rds'))
+saveRDS(edx_genre_clusters, file = file.path('Data', 'edx_genre_clusters.rds'))
+
+# Clear Memory
+# Keep Training Set
+clear_memory(keep = 'edx_train')
