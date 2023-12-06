@@ -287,12 +287,17 @@ clear_memory(keep = 'edx_train')
 # Contextual based filtering can utilize review environment data
 
 # These models lack independent film input, films of similar context or environment
+<<<<<<< HEAD
 # will differ in popularity (e.g. The Dark Knight vs Batman & Robin)
+=======
+# will differ in popularity (eg The Dark Knight vs Batman & Robin)
+>>>>>>> 2f642d08513c447d1894bd7b728cfe9bea190c62
 # A film based model is required to account for this missing input
 
 # A ensemble model can be utilized to merge the different model
 # for simplicity a linear regression stacked model will be used
 
+<<<<<<< HEAD
 # There's no accounting for taste?
 # In order to explore that taste can be accounted for user based predictions will include
 # a running count of the amount of reviews a user has made, this is to see whether a
@@ -304,6 +309,8 @@ clear_memory(keep = 'edx_train')
 # some people are trend followers and others may actively avoid it.
 # For appropriate use of counts these will be lagged measures as to account for data leakage
 
+=======
+>>>>>>> 2f642d08513c447d1894bd7b728cfe9bea190c62
 glimpse(edx_train)
 
 # this requires removal of film ID and title
@@ -355,7 +362,11 @@ edx_train <- edx_train %>%
                        names_sep = '_',
                        too_few = 'align_start') %>%
   # Rename genres to singular
+<<<<<<< HEAD
   rename_with(~ str_replace(.x, '^genres', 'genre')) %>%
+=======
+  rename_with( ~ str_replace(.x, '^genres', 'genre')) %>%
+>>>>>>> 2f642d08513c447d1894bd7b728cfe9bea190c62
   # Replace NA genres with None
   mutate(across(starts_with('genre'), \(x) replace_na(x, 'None'))) %>%
   # Engineer date-time features
@@ -382,6 +393,7 @@ edx_train <- edx_train %>%
     second = second(timestamp),
     # Calculate Film Age
     film_age = year - film_year_of_release,
+<<<<<<< HEAD
     film_year_of_release = as_factor(as.character(film_year_of_release))
   ) %>%
   # Relocate features as preferred
@@ -396,6 +408,14 @@ edx_train <- edx_train %>%
   group_by(movie_id) %>%
   mutate(movie_reviews = lag(row_number(), default = 0)) %>%
   ungroup()
+=======
+  ) %>%
+  # Relocate features as preffered
+  relocate(film_year_of_release, .before = timestamp) %>%
+  relocate(film_age, .after = film_year_of_release) %>%
+  # Genres as Factors
+  mutate(across(starts_with('genre'), as.factor))
+>>>>>>> 2f642d08513c447d1894bd7b728cfe9bea190c62
 
 # Save Train and Test Set to File for storage
 saveRDS(edx_train, file = file.path('Data', 'edx_train.rds'))
@@ -404,6 +424,7 @@ saveRDS(edx_train, file = file.path('Data', 'edx_train.rds'))
 # Keep Training Set
 clear_memory(keep = 'edx_train')
 
+<<<<<<< HEAD
 # Data Exploration & Feature Engineering ----------------------------------
 
 library(broom)
@@ -896,6 +917,31 @@ genre_clusters_max
 
 library(furrr)
 library(doParallel)
+=======
+# Feature Extraction ------------------------------------------------------
+
+### Title Clusters --------------------------------------------------------
+
+library(tidytext)
+
+# Individual Films and title words in tidy format
+# Keep cases
+title_words <- edx_train %>%
+  distinct(movie_id, .keep_all = TRUE) %>%
+  unnest_tokens('title_words', 'title',
+                token = 'words',
+                to_lower = FALSE) %>%
+  select(all_of(c('movie_id', 'title_words')))
+
+title_words_wide <- title_words %>%
+  group_by(movie_id) %>% 
+  mutate(word_n = paste('word',row_number(),sep = '_')) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = word_n, values_from = title_words,
+              values_fill = 'None'
+  ) %>% 
+  mutate(across(starts_with('word_'),as.factor))
+>>>>>>> 2f642d08513c447d1894bd7b728cfe9bea190c62
 
 # Custom K-Modes Function
 kmodes_fn <-
@@ -917,6 +963,7 @@ kmodes_fn <-
     return(sum(model[4]$withindiff))
   }
 
+<<<<<<< HEAD
 # Plan Parallel
 parallel_cores <- detectCores() - 1
 
@@ -2747,3 +2794,38 @@ final_holdout_test_pred %>%
 # Conclusions
 
 options(knitr.duplicate.label = "allow")
+=======
+title_words_counts <- title_words %>%
+  count(title_words, sort = TRUE)
+
+mode_stat <- function(x){
+  uniqv <- unique(x)
+  uniqv[which.max(tabulate(match(x, uniqv)))]
+}
+
+title_words_counts %>% 
+  summarise(mean = mean(n),
+            sd = sd(n),
+            median = median(n),
+            mode = mode_stat(n),
+            min = min(n),
+            max = max(n))
+
+# At least 3 clusters are required
+# There are a a large number of single count words
+
+title_modes <- tibble(clusters = 3:2489,
+       data = list(select(title_words, all_of('title_words')))
+       ) %>% 
+  mutate(k_modes = map2(
+    data,
+    clusters,
+    seed = 2250,
+    weighted = TRUE,
+    # Using Weighted distances to account for differences in genre frequencies
+    kmodes_fn,
+    .progress = 'K-Modes'
+  ))
+
+title_modes
+>>>>>>> 2f642d08513c447d1894bd7b728cfe9bea190c62
